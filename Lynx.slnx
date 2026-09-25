@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Lynx.vcxproj" Id="22ba5425-0096-4140-9497-09f36716b9fa" />
+</Solution>
