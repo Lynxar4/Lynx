@@ -3,3 +3,4 @@ tasks.json
 x64/
 vcpkg_installed/
 *.vcxproj.user
+log.txt

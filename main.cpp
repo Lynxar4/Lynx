@@ -2,6 +2,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <iostream>
 #include <fstream>
+#include <chrono>
+#include <format>
 #include <string>
 #include <string_view>
 #include <algorithm>
@@ -32,7 +34,7 @@ int main()
 		return 1;
 	}
 
-	std::ifstream file("tasks.json");
+	std::ifstream file("C:/C++ Projects/Lynx/tasks.json");
 	if (!file.is_open())
 	{
 		std::cout << "Failed to open json file.\n";
@@ -48,6 +50,18 @@ int main()
 
 	std::sort(tasks.begin(), tasks.end(), [](const json& task1, const json& task2)
 		{
+			bool t1IsExam{ task1.contains("type") && task1["type"] == "exam"};
+			bool t2IsExam{ task2.contains("type") && task2["type"] == "exam" };
+
+			if (t1IsExam && !t2IsExam)
+			{
+				return false;
+			}
+			if (!t1IsExam && t2IsExam)
+			{
+				return true;
+			}
+
 			return task1["deadline"].get<std::string>() < task2["deadline"].get<std::string>();
 		}
 	);
@@ -55,27 +69,34 @@ int main()
 	std::string taskList{};
 	for (const auto& e : tasks)
 	{
-		if (e["status"] == "done")
+		if (e.contains("status") && e["status"] == "done")
 		{
 			continue;
 		}
+		std::string status{ e.contains("status") ? e["status"].get<std::string>() : "N/A" };
 		taskList += "Task: " + e["task"].get<std::string>() +
 			" | Category: " + e["category"].get<std::string>() +
 			" | Deadline: " + e["deadline"].get<std::string>() +
-			" | Status: " + e["status"].get<std::string>() + '\n';
+			" | Status: " + status +
+			" | Type: " + e["type"].get<std::string>() + '\n';
 	}
+	std::cout << taskList << '\n';
 
 	httplib::Client cli("https://generativelanguage.googleapis.com");
-	httplib::Headers headers = { // httplib::Headers behaves like a map container
+	httplib::Headers headers = {
 		{ "x-goog-api-key", *apiKey }
 	};
 
-	json textPart = { {"text", taskList} }; 
+	std::string prompt{ "Here are my current tasks: \n" + 
+	taskList + "\n\n" +
+	"Analyze these tasks and tell me what I should focus on first. Give reasoning behind your explanation." 
+	};
+
+	json textPart = { {"text", prompt} }; 
 	json partsArray = json::array({ textPart });
 	json contentEntry = { {"parts", partsArray} };
 	json contentsArray = json::array({contentEntry});
 	json body = { { "contents", contentsArray } };
-	std::cout << body.dump(2);
 
 	auto res = cli.Post(
 		"/v1beta/models/gemini-3.5-flash-lite:generateContent",
@@ -91,13 +112,27 @@ int main()
 	}
 
 	std::cout << "RESPONSE\n";
-	std::cout << "Status: " << res->status << '\n';
+	if (res->status != 200)
+	{
+		std::cout << "API error " << res->status << ": " << res->body << '\n';
+		return 1;
+	}
 	json responseData = json::parse(res->body);
 	std::string answer{ responseData["candidates"][0]["content"]["parts"][0]["text"] };
 	std::cout << answer << '\n';
 
-
-	
+	std::ofstream log("C:/C++ Projects/Lynx/log.txt", std::ios::app);
+	if (!log.is_open())
+	{
+		std::cout << "Failed to open log file.\n";
+	}
+	else // Log write is optional so a guard clause isn't necessary
+	{
+		auto now{ std::chrono::system_clock::now() };
+		std::string timeStamp{ std::format("{0:%F %T}", now) };
+		log << "[" << timeStamp << "]\n";
+		log << answer << "\n\n";
+	}
 
 	return 0;
 }
