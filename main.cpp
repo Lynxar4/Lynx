@@ -26,31 +26,27 @@ std::optional<std::string> getApiKey()
 	return std::string{ apiKey };
 }
 
-int main()
+std::optional<json> getTasks()
 {
-	auto apiKey{ getApiKey() };
-	if (!apiKey)
-	{
-		return 1;
-	}
-
 	std::ifstream file("C:/C++ Projects/Lynx/tasks.json");
 	if (!file.is_open())
 	{
-		std::cout << "Failed to open json file.\n";
-		return 1;
+		return std::nullopt;
 	}
+	return json::parse(file);
+}
 
-	json data = json::parse(file);
+std::vector<json> getSortedTasks(json tasksJson)
+{
 	std::vector<json> tasks{};
-	for (const auto& e : data)
+	for (const auto& e : tasksJson)
 	{
 		tasks.push_back(e);
 	}
 
 	std::sort(tasks.begin(), tasks.end(), [](const json& task1, const json& task2)
 		{
-			bool t1IsExam{ task1.contains("type") && task1["type"] == "exam"};
+			bool t1IsExam{ task1.contains("type") && task1["type"] == "exam" };
 			bool t2IsExam{ task2.contains("type") && task2["type"] == "exam" };
 
 			if (t1IsExam && !t2IsExam)
@@ -65,8 +61,12 @@ int main()
 			return task1["deadline"].get<std::string>() < task2["deadline"].get<std::string>();
 		}
 	);
+	return tasks;
+}
 
-	std::string taskList{};
+std::string getListString(std::vector<json> tasks)
+{
+	std::string listString{};
 	for (const auto& e : tasks)
 	{
 		if (e.contains("status") && e["status"] == "done")
@@ -74,32 +74,60 @@ int main()
 			continue;
 		}
 		std::string status{ e.contains("status") ? e["status"].get<std::string>() : "N/A" };
-		taskList += "Task: " + e["task"].get<std::string>() +
+		listString += "Task: " + e["task"].get<std::string>() +
 			" | Category: " + e["category"].get<std::string>() +
 			" | Deadline: " + e["deadline"].get<std::string>() +
 			" | Status: " + status +
 			" | Type: " + e["type"].get<std::string>() + '\n';
 	}
-	std::cout << taskList << '\n';
+	return listString;
+}
+
+int main()
+{
+	auto apiKey{ getApiKey() };
+	if (!apiKey)
+	{
+		return 1;
+	}
+
+	auto tasksOpt{ getTasks() };
+	if (!tasksOpt)
+	{
+		std::cout << "Failed to get tasks.\n";
+		return 1;
+	}
+
+	json tasks{ *tasksOpt };
+	std::vector<json> sortedTasks{ getSortedTasks(tasks) };
+	std::string tasklist{ getListString(sortedTasks) };
 
 	httplib::Client cli("https://generativelanguage.googleapis.com");
 	httplib::Headers headers = {
 		{ "x-goog-api-key", *apiKey }
 	};
 
-	std::string prompt{ "Here are my current tasks: \n" + 
-	taskList + "\n\n" +
-	"Analyze these tasks and tell me what I should focus on first. Give reasoning behind your explanation." 
+	json parameters = {
+		{"type", "object"},
+		{"properties", json::object()},
+		{"required", json::array()}
 	};
 
-	json textPart = { {"text", prompt} }; 
-	json partsArray = json::array({ textPart });
-	json contentEntry = { {"parts", partsArray} };
-	json contentsArray = json::array({contentEntry});
-	json body = { { "contents", contentsArray } };
+	json taskDeclaration = {
+		{"type", "function"},
+		{"name", "get_tasks"},
+		{"description", "gets user's tasklist with status and deadlines"},
+		{"parameters", parameters}
+	};
+	
+	json body = {
+		{"model", "gemini-3.8-flash"},
+		{"input", "Give me a morning briefing on my current tasks"},
+		{"tools", json::array({taskDeclaration})}
+	};
 
 	auto res = cli.Post(
-		"/v1beta/models/gemini-3.5-flash-lite:generateContent",
+		"/v1beta/interactions",
 		headers,
 		body.dump(),
 		"application/json"
@@ -118,20 +146,31 @@ int main()
 		return 1;
 	}
 	json responseData = json::parse(res->body);
-	std::string answer{ responseData["candidates"][0]["content"]["parts"][0]["text"] };
-	std::cout << answer << '\n';
+	std::cout << responseData.dump(2) << '\n';
+
+	std::string interactionID{ responseData["id"].get<std::string>() };
+	std::cout << interactionID << '\n';
+	std::string functionID{};
+	for (const json& e : responseData["steps"])
+	{
+		if (e["type"] == "function_call")
+		{
+			functionID = e["id"].get<std::string>();
+		}
+	}
+	std::cout << functionID << '\n';
 
 	std::ofstream log("C:/C++ Projects/Lynx/log.txt", std::ios::app);
 	if (!log.is_open())
 	{
-		std::cout << "Failed to open log file.\n";
+		std::cout << "Failed to open log file.\n"; // Log write is optional so a guard clause isn't necessary
 	}
-	else // Log write is optional so a guard clause isn't necessary
+	else
 	{
 		auto now{ std::chrono::system_clock::now() };
 		std::string timeStamp{ std::format("{0:%F %T}", now) };
 		log << "[" << timeStamp << "]\n";
-		log << answer << "\n\n";
+		//log << answer << "\n\n";
 	}
 
 	return 0;
