@@ -13,10 +13,18 @@
 
 using json = nlohmann::json;
 
+namespace config
+{
+	constexpr auto server{ "https://generativelanguage.googleapis.com" };
+	constexpr auto apiPath{ "/v1beta/interactions" };
+	constexpr auto modelName{ "gemini-3.5-flash-lite" };
+	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
+	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
+}
 
 std::optional<std::string> getApiKey()
 {
-	const char* apiKey{ std::getenv("GEMINI_API_KEY") };
+	const char* apiKey{ std::getenv("GEMINI_API_KEY") }; 
 	if (!apiKey)
 	{
 		std::cout << "API key could not be found";
@@ -28,15 +36,24 @@ std::optional<std::string> getApiKey()
 
 std::optional<json> getTasks()
 {
-	std::ifstream file("C:/C++ Projects/Lynx/tasks.json");
+	std::ifstream file(config::tasksPath);
 	if (!file.is_open())
 	{
 		return std::nullopt;
 	}
-	return json::parse(file);
+	try
+	{
+		return json::parse(file);
+	}
+	catch (const json::parse_error& e)
+	{
+		std::cout << "tasks.json is not a valid json. Description: " << e.what() << '\n';
+		return std::nullopt;
+
+	}
 }
 
-std::vector<json> getSortedTasks(json tasksJson)
+std::vector<json> getSortedTasks(const json& tasksJson)
 {
 	std::vector<json> tasks{};
 	for (const auto& e : tasksJson)
@@ -64,7 +81,7 @@ std::vector<json> getSortedTasks(json tasksJson)
 	return tasks;
 }
 
-std::string getListString(std::vector<json> tasks)
+std::string getListString(const std::vector<json>& tasks)
 {
 	std::string listString{};
 	for (const auto& e : tasks)
@@ -114,14 +131,14 @@ int main()
 	json tasks = *tasksOpt;
 	std::vector<json> sortedTasks{ getSortedTasks(tasks) };
 
-	httplib::Client cli("https://generativelanguage.googleapis.com");
+	httplib::Client cli(config::server);
 	httplib::Headers headers = {
 		{ "x-goog-api-key", *apiKey }
 	};
 
 	json parameters = {
 		{"type", "object"},
-		{"properties", json::object()},
+		{"properties", json::object()}, // properties are arguments for the function
 		{"required", json::array()}
 	};
 
@@ -133,13 +150,13 @@ int main()
 	};
 	
 	json body = {
-		{"model", "gemini-3.5-flash-lite"},
-		{"input", "Give me a morning briefing on my current tasks"},
+		{"model", config::modelName},
+		{"input", "Hey what is today's date?"},
 		{"tools", json::array({taskDeclaration})}
 	};
 
 	auto res = cli.Post(
-		"/v1beta/interactions",
+		config::apiPath,
 		headers,
 		body.dump(),
 		"application/json"
@@ -184,14 +201,14 @@ int main()
 			};
 			json input = json::array({ functionResult });
 			json body2{
-				{"model", "gemini-3.5-flash-lite"},
+				{"model", config::modelName},
 				{"input", input},
 				{ "tools", json::array({taskDeclaration}) },
 				{"previous_interaction_id", interactionID} 
 			};
 
 			auto res2 = cli.Post(
-				"/v1beta/interactions",
+				config::apiPath,
 				headers,
 				body2.dump(),
 				"application/json"
@@ -224,7 +241,7 @@ int main()
 		answer = "An error occured somewhere. First response status: " + status;
 	}
 
-	std::ofstream log("C:/C++ Projects/Lynx/log.txt", std::ios::app);
+	std::ofstream log(config::logPath, std::ios::app);
 	if (!log.is_open())
 	{
 		std::cout << "Failed to open log file.\n"; // Log write is optional so a guard clause isn't necessary
