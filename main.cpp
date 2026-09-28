@@ -83,6 +83,19 @@ std::string getListString(std::vector<json> tasks)
 	return listString;
 }
 
+std::string getAnswer(const json& response)
+{
+	std::string answer{};
+	for (const json& e : response["steps"])
+	{
+		if (e["type"] == "model_output")
+		{
+			answer = e["content"][0]["text"];
+		}
+	}
+	return answer;
+}
+
 int main()
 {
 	auto apiKey{ getApiKey() };
@@ -98,9 +111,8 @@ int main()
 		return 1;
 	}
 
-	json tasks{ *tasksOpt };
+	json tasks = *tasksOpt;
 	std::vector<json> sortedTasks{ getSortedTasks(tasks) };
-	std::string tasklist{ getListString(sortedTasks) };
 
 	httplib::Client cli("https://generativelanguage.googleapis.com");
 	httplib::Headers headers = {
@@ -121,7 +133,7 @@ int main()
 	};
 	
 	json body = {
-		{"model", "gemini-3.8-flash"},
+		{"model", "gemini-3.5-flash-lite"},
 		{"input", "Give me a morning briefing on my current tasks"},
 		{"tools", json::array({taskDeclaration})}
 	};
@@ -146,19 +158,71 @@ int main()
 		return 1;
 	}
 	json responseData = json::parse(res->body);
-	std::cout << responseData.dump(2) << '\n';
+	std::string status{ responseData["status"].get<std::string>() };
+	if (status != "completed" && status != "requires_action")
+	{
+		std::cout << "Interaction failed with status " << status;
+		return 1;
+	}
 
 	std::string interactionID{ responseData["id"].get<std::string>() };
-	std::cout << interactionID << '\n';
 	std::string functionID{};
+	std::string answer{getAnswer(responseData)};
 	for (const json& e : responseData["steps"])
 	{
 		if (e["type"] == "function_call")
 		{
 			functionID = e["id"].get<std::string>();
+			std::string tasklist{ getListString(sortedTasks) };
+			json resultPart{ {"type", "text"}, {"text", tasklist} };
+			json resultArray = json::array({resultPart});
+			json functionResult{ 
+				{"type", "function_result"},
+				{"name", "get_tasks"},
+				{"call_id", functionID},
+				{"result", resultArray} 
+			};
+			json input = json::array({ functionResult });
+			json body2{
+				{"model", "gemini-3.5-flash-lite"},
+				{"input", input},
+				{ "tools", json::array({taskDeclaration}) },
+				{"previous_interaction_id", interactionID} 
+			};
+
+			auto res2 = cli.Post(
+				"/v1beta/interactions",
+				headers,
+				body2.dump(),
+				"application/json"
+			);
+
+			if (!res2)
+			{
+				std::cout << "Request failed.\n";
+				return 1;
+			}
+
+			std::cout << "RESPONSE 2\n";
+			if (res2->status != 200)
+			{
+				std::cout << "API error " << res2->status << ": " << res2->body << '\n';
+				return 1;
+			}
+			json responseData2 = json::parse(res2->body);
+			if (responseData2["status"] != "completed")
+			{
+				std::cout << "Interaction did not complete.\n";
+				return 1;
+			}
+			answer = getAnswer(responseData2);
 		}
 	}
-	std::cout << functionID << '\n';
+	std::cout << answer;
+	if (answer.empty())
+	{
+		answer = "An error occured somewhere. First response status: " + status;
+	}
 
 	std::ofstream log("C:/C++ Projects/Lynx/log.txt", std::ios::app);
 	if (!log.is_open())
@@ -170,7 +234,7 @@ int main()
 		auto now{ std::chrono::system_clock::now() };
 		std::string timeStamp{ std::format("{0:%F %T}", now) };
 		log << "[" << timeStamp << "]\n";
-		//log << answer << "\n\n";
+		log << answer << "\n\n";
 	}
 
 	return 0;
