@@ -15,16 +15,17 @@ using json = nlohmann::json;
 
 namespace config
 {
-	constexpr auto server{ "https://generativelanguage.googleapis.com" };
+	constexpr auto geminiServer{ "https://generativelanguage.googleapis.com" };
+	constexpr auto tavilyServer{ "https://api.tavily.com" };
 	constexpr auto apiPath{ "/v1beta/interactions" };
 	constexpr auto modelName{ "gemini-3.5-flash-lite" };
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
 }
 
-std::optional<std::string> getApiKey()
+std::optional<std::string> getApiKey(const char* keyName)
 {
-	const char* apiKey{ std::getenv("GEMINI_API_KEY") }; 
+	const char* apiKey{ std::getenv(keyName) }; 
 	if (!apiKey)
 	{
 		std::cout << "API key could not be found";
@@ -113,10 +114,57 @@ std::string getAnswer(const json& response)
 	return answer;
 }
 
+json getSearchResult(std::string apiKey, std::string query)
+{
+	httplib::Client cli(config::tavilyServer);
+	httplib::Headers headers{
+		{"Content-Type", "application/json"},
+		{"Authorization", "Bearer" + apiKey},
+	};
+	json body{
+		{ "query", query }
+	};
+
+	auto res = cli.Post(
+		"/search",
+		headers,
+		body.dump(),
+		"application/json"
+	);
+
+	if (!res)
+	{
+		std::cout << "Request failed.\n";
+		return {};
+	}
+	if (res->status != 200)
+	{
+		std::cout << "API error " << res->status << ": " << res->body << '\n';
+		return 1;
+	}
+
+	json responseData{ json::parse(res->body) };
+	return responseData;
+}
+
+std::string getCommand()
+{
+	std::cout << "Enter a command: ";
+	std::string command{};
+	std::getline(std::cin >> std::ws, command);
+	return command;
+}
+
 int main()
 {
-	auto apiKey{ getApiKey() };
-	if (!apiKey)
+	auto geminiApiKey{getApiKey("GEMINI_API_KEY")};
+	if (!geminiApiKey)
+	{
+		return 1;
+	}
+
+	auto tavilyApiKey{ getApiKey("TAVILY_API_KEY") };
+	if (!tavilyApiKey)
 	{
 		return 1;
 	}
@@ -131,11 +179,12 @@ int main()
 	json tasks = *tasksOpt;
 	std::vector<json> sortedTasks{ getSortedTasks(tasks) };
 
-	httplib::Client cli(config::server);
+	httplib::Client cli(config::geminiServer);
 	httplib::Headers headers = {
-		{ "x-goog-api-key", *apiKey }
+		{ "x-goog-api-key", *geminiApiKey }
 	};
 
+	std::string command{getCommand()};
 	json parameters = {
 		{"type", "object"},
 		{"properties", json::object()}, // properties are arguments for the function
@@ -144,15 +193,22 @@ int main()
 
 	json taskDeclaration = {
 		{"type", "function"},
-		{"name", "get_tasks"},
+		{"name", "getTasks"},
 		{"description", "gets user's tasklist with status and deadlines"},
+		{"parameters", parameters}
+	};
+
+	json webSearch = {
+		{"type", "function"},
+		{"name", "webSearch"},
+		{"description", "Search the web"},
 		{"parameters", parameters}
 	};
 	
 	json body = {
 		{"model", config::modelName},
-		{"input", "Hey what is today's date?"},
-		{"tools", json::array({taskDeclaration})}
+		{"input", command},
+		{"tools", json::array({taskDeclaration, webSearch})}
 	};
 
 	auto res = cli.Post(
@@ -168,7 +224,6 @@ int main()
 		return 1;
 	}
 
-	std::cout << "RESPONSE\n";
 	if (res->status != 200)
 	{
 		std::cout << "API error " << res->status << ": " << res->body << '\n';
@@ -187,7 +242,7 @@ int main()
 	std::string answer{getAnswer(responseData)};
 	for (const json& e : responseData["steps"])
 	{
-		if (e["type"] == "function_call")
+		if (e["type"] == "function_call" && e["name"] == "getTasks")
 		{
 			functionID = e["id"].get<std::string>();
 			std::string tasklist{ getListString(sortedTasks) };
@@ -195,7 +250,7 @@ int main()
 			json resultArray = json::array({resultPart});
 			json functionResult{ 
 				{"type", "function_result"},
-				{"name", "get_tasks"},
+				{"name", "getTasks"},
 				{"call_id", functionID},
 				{"result", resultArray} 
 			};
@@ -220,7 +275,6 @@ int main()
 				return 1;
 			}
 
-			std::cout << "RESPONSE 2\n";
 			if (res2->status != 200)
 			{
 				std::cout << "API error " << res2->status << ": " << res2->body << '\n';
@@ -234,7 +288,49 @@ int main()
 			}
 			answer = getAnswer(responseData2);
 		}
+		else if (e["type"] == "function_call" && e["name"] == "webSearch")
+		{
+			functionID = e["id"].get<std::string>();
+			json resultPart{ {"type", "text"}, {"text", getSearchResult(*tavilyApiKey, command).dump()}};
+			json resultArray = json::array({ resultPart });
+			json functionResult{
+				{"type", "function_result"},
+				{"name", "webSearch"},
+				{"call_id", functionID},
+				{"result", resultArray}
+			};
+			json input = json::array({ functionResult });
+			json body2{
+				{"model", config::modelName},
+				{"input", input},
+				{ "tools", json::array({webSearch}) },
+				{"previous_interaction_id", interactionID}
+			};
+
+			auto res2 = cli.Post(
+				config::apiPath,
+				headers,
+				body2.dump(),
+				"application/json"
+			);
+
+			if (!res2)
+			{
+				std::cout << "Request failed.\n";
+				return 1;
+			}
+
+			if (res2->status != 200)
+			{
+				std::cout << "API error " << res2->status << ": " << res2->body << '\n';
+				return 1;
+			}
+			json responseData2 = json::parse(res2->body);
+			answer = getAnswer(responseData2);
+			
+		}
 	}
+	std::cout << '\n';
 	std::cout << answer;
 	if (answer.empty())
 	{
