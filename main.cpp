@@ -21,6 +21,7 @@ namespace config
 	constexpr auto modelName{ "gemini-3.5-flash-lite" };
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
+	constexpr bool debug{ false };
 }
 
 std::optional<std::string> getApiKey(const char* keyName)
@@ -119,7 +120,7 @@ json getSearchResult(std::string apiKey, std::string query)
 	httplib::Client cli(config::tavilyServer);
 	httplib::Headers headers{
 		{"Content-Type", "application/json"},
-		{"Authorization", "Bearer" + apiKey},
+		{"Authorization", "Bearer " + apiKey},
 	};
 	json body{
 		{ "query", query }
@@ -153,6 +154,44 @@ std::string getCommand()
 	std::string command{};
 	std::getline(std::cin >> std::ws, command);
 	return command;
+}
+
+std::optional<json> sendFunctionResult(std::string_view interactionID, std::string_view functionID, std::string_view functionName, const json& tool, std::string_view result, httplib::Client& cli, httplib::Headers& headers)
+{
+	json resultPart{ {"type", "text"}, {"text", result} };
+	json resultArray{ json::array({resultPart}) };
+	json input{
+		{"type", "function_result"},
+		{"name", functionName},
+		{"call_id", functionID},
+		{"result", resultArray}
+	};
+	json inputArray{ json::array({input}) };
+	json body2{
+		{"model", config::modelName},
+		{"input", inputArray},
+		{"tools", json::array({tool})},
+		{"previous_interaction_id", interactionID}
+	};
+
+	auto res = cli.Post(
+		config::apiPath,
+		headers,
+		body2.dump(),
+		"application/json"
+	);
+	if (!res)
+	{
+		std::cout << "Request failed.\n";
+	}
+	if (res->status != 200)
+	{
+		std::cout << "API error " << res->status << ": " << res->body << '\n';
+		return 1;
+	}
+
+	json responseData{ json::parse(res->body) };
+	return responseData;
 }
 
 int main()
@@ -240,94 +279,29 @@ int main()
 	std::string interactionID{ responseData["id"].get<std::string>() };
 	std::string functionID{};
 	std::string answer{getAnswer(responseData)};
+	if (config::debug)
+	{
+		std::cout << responseData.dump(2);
+	}
 	for (const json& e : responseData["steps"])
 	{
-		if (e["type"] == "function_call" && e["name"] == "getTasks")
+		if (e["type"] == "function_call" && e["name"] == "getTasks") 
 		{
 			functionID = e["id"].get<std::string>();
 			std::string tasklist{ getListString(sortedTasks) };
-			json resultPart{ {"type", "text"}, {"text", tasklist} };
-			json resultArray = json::array({resultPart});
-			json functionResult{ 
-				{"type", "function_result"},
-				{"name", "getTasks"},
-				{"call_id", functionID},
-				{"result", resultArray} 
-			};
-			json input = json::array({ functionResult });
-			json body2{
-				{"model", config::modelName},
-				{"input", input},
-				{ "tools", json::array({taskDeclaration}) },
-				{"previous_interaction_id", interactionID} 
-			};
-
-			auto res2 = cli.Post(
-				config::apiPath,
-				headers,
-				body2.dump(),
-				"application/json"
-			);
-
-			if (!res2)
-			{
-				std::cout << "Request failed.\n";
+			std::optional<json> responseData{sendFunctionResult(interactionID, functionID, "getTasks", taskDeclaration, tasklist, cli, headers)};
+			if (!responseData)
 				return 1;
-			}
-
-			if (res2->status != 200)
-			{
-				std::cout << "API error " << res2->status << ": " << res2->body << '\n';
-				return 1;
-			}
-			json responseData2 = json::parse(res2->body);
-			if (responseData2["status"] != "completed")
-			{
-				std::cout << "Interaction did not complete.\n";
-				return 1;
-			}
-			answer = getAnswer(responseData2);
+			answer = getAnswer(*responseData);
 		}
 		else if (e["type"] == "function_call" && e["name"] == "webSearch")
 		{
 			functionID = e["id"].get<std::string>();
-			json resultPart{ {"type", "text"}, {"text", getSearchResult(*tavilyApiKey, command).dump()}};
-			json resultArray = json::array({ resultPart });
-			json functionResult{
-				{"type", "function_result"},
-				{"name", "webSearch"},
-				{"call_id", functionID},
-				{"result", resultArray}
-			};
-			json input = json::array({ functionResult });
-			json body2{
-				{"model", config::modelName},
-				{"input", input},
-				{ "tools", json::array({webSearch}) },
-				{"previous_interaction_id", interactionID}
-			};
-
-			auto res2 = cli.Post(
-				config::apiPath,
-				headers,
-				body2.dump(),
-				"application/json"
-			);
-
-			if (!res2)
-			{
-				std::cout << "Request failed.\n";
+			std::string searchResult{ getSearchResult(*tavilyApiKey, command).dump() };
+			std::optional<json> responseData{ sendFunctionResult(interactionID, functionID, "webSearch", webSearch, searchResult, cli, headers) };
+			if (!responseData)
 				return 1;
-			}
-
-			if (res2->status != 200)
-			{
-				std::cout << "API error " << res2->status << ": " << res2->body << '\n';
-				return 1;
-			}
-			json responseData2 = json::parse(res2->body);
-			answer = getAnswer(responseData2);
-			
+			answer = getAnswer(*responseData);
 		}
 	}
 	std::cout << '\n';
