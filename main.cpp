@@ -21,7 +21,7 @@ namespace config
 	constexpr auto modelName{ "gemini-3.5-flash-lite" };
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
-	constexpr bool debug{ false };
+	constexpr bool debug{ true };
 }
 
 std::optional<std::string> getApiKey(const char* keyName)
@@ -156,47 +156,39 @@ std::string getCommand()
 	return command;
 }
 
-std::optional<json> sendFunctionResult(std::string_view interactionID, std::string_view functionID, std::string_view functionName, const json& tool, std::string_view result, httplib::Client& cli, httplib::Headers& headers)
+json buildFunctionResult(std::string_view functionName, std::string_view callID, std::string_view result)
 {
 	json resultPart{ {"type", "text"}, {"text", result} };
-	json resultArray{ json::array({resultPart}) };
-	json input{
+	return json {
 		{"type", "function_result"},
 		{"name", functionName},
-		{"call_id", functionID},
-		{"result", resultArray}
+		{"call_id", callID},
+		{"result", json::array({resultPart})}
 	};
-	json inputArray{ json::array({input}) };
-	json body2{
-		{"model", config::modelName},
-		{"input", inputArray},
-		{"tools", json::array({tool})},
-		{"previous_interaction_id", interactionID}
-	};
+}
 
-	auto res = cli.Post(
-		config::apiPath,
-		headers,
-		body2.dump(),
-		"application/json"
-	);
-	if (!res)
+std::optional<std::string> readFileContents(const std::string& path)
+{
+	std::ifstream file{ path };
+	if (!file)
 	{
-		std::cout << "Request failed.\n";
-	}
-	if (res->status != 200)
-	{
-		std::cout << "API error " << res->status << ": " << res->body << '\n';
-		return 1;
+		std::cerr << path << " could not be opened for reading.\n";
+		return std::nullopt;
 	}
 
-	json responseData{ json::parse(res->body) };
-	return responseData;
+	std::string fileText{};
+	std::string line{};
+	while (std::getline(file, line))
+	{
+		fileText += line + '\n';
+	}
+
+	return fileText;
 }
 
 int main()
 {
-	auto geminiApiKey{getApiKey("GEMINI_API_KEY")};
+	auto geminiApiKey{ getApiKey("GEMINI_API_KEY") };
 	if (!geminiApiKey)
 	{
 		return 1;
@@ -223,7 +215,7 @@ int main()
 		{ "x-goog-api-key", *geminiApiKey }
 	};
 
-	std::string command{getCommand()};
+	std::string command{ getCommand() };
 	json parameters = {
 		{"type", "object"},
 		{"properties", json::object()}, // properties are arguments for the function
@@ -243,11 +235,31 @@ int main()
 		{"description", "Search the web"},
 		{"parameters", parameters}
 	};
+
+	json pathProperty = {
+		{"path", {
+			{"type", "string"},
+			{"description", "path of the file"}
+			}}
+	};
+
+	json readFileParameters = {
+		{"type", "object"},
+		{"properties", pathProperty},
+		{"required", json::array({"path"})}
+	};
+
+	json readFile = {
+		{"type", "function"},
+		{"name", "readFile"},
+		{"description", "Read the user's file"},
+		{"parameters", readFileParameters},
+	};
 	
 	json body = {
 		{"model", config::modelName},
 		{"input", command},
-		{"tools", json::array({taskDeclaration, webSearch})}
+		{"tools", json::array({taskDeclaration, webSearch, readFile})}
 	};
 
 	auto res = cli.Post(
@@ -283,27 +295,75 @@ int main()
 	{
 		std::cout << responseData.dump(2);
 	}
-	for (const json& e : responseData["steps"])
+
+	while (status == "requires_action")
 	{
-		if (e["type"] == "function_call" && e["name"] == "getTasks") 
+		bool calledTool{ false };
+		json inputArray = json::array();
+
+		for (const json& e : responseData["steps"])
 		{
-			functionID = e["id"].get<std::string>();
-			std::string tasklist{ getListString(sortedTasks) };
-			std::optional<json> responseData{sendFunctionResult(interactionID, functionID, "getTasks", taskDeclaration, tasklist, cli, headers)};
-			if (!responseData)
-				return 1;
-			answer = getAnswer(*responseData);
+			if (e["type"] == "function_call" && e["name"] == "getTasks")
+			{
+				functionID = e["id"].get<std::string>();
+				std::string tasklist{ getListString(sortedTasks) };
+				json result{buildFunctionResult("getTasks", functionID, tasklist)};
+				inputArray.push_back(result);
+				calledTool = true;
+			}
+			else if (e["type"] == "function_call" && e["name"] == "webSearch")
+			{
+				functionID = e["id"].get<std::string>();
+				std::string searchResult{ getSearchResult(*tavilyApiKey, command).dump() };
+				json result{ buildFunctionResult("webSearch", functionID, searchResult) };
+				inputArray.push_back(result);
+				calledTool = true;
+			}
+			else if (e["type"] == "function_call" && e["name"] == "readFile")
+			{
+				functionID = e["id"].get<std::string>();
+				std::string path{ e["arguments"]["path"] };
+				std::optional<std::string> fileContent{ readFileContents(path) };
+				if (!fileContent)
+					return 1;
+				json result{ buildFunctionResult("readFile", functionID, *fileContent) };
+				inputArray.push_back(result);
+				calledTool = true;
+			}
 		}
-		else if (e["type"] == "function_call" && e["name"] == "webSearch")
+
+		if (!calledTool) // stops the loop if nothing matched
+			break;
+
+		json body2{
+		{"model", config::modelName},
+		{"input", inputArray},
+		{"tools", json::array({taskDeclaration, webSearch, readFile})},
+		{"previous_interaction_id", interactionID}
+		};
+
+		auto res2 = cli.Post(config::apiPath, headers, body2.dump(), "application/json");
+		if (!res2)
 		{
-			functionID = e["id"].get<std::string>();
-			std::string searchResult{ getSearchResult(*tavilyApiKey, command).dump() };
-			std::optional<json> responseData{ sendFunctionResult(interactionID, functionID, "webSearch", webSearch, searchResult, cli, headers) };
-			if (!responseData)
-				return 1;
-			answer = getAnswer(*responseData);
+			std::cerr << "Request failed.\n";
+			return 1;
 		}
+		if (res2->status != 200)
+		{
+			std::cout << "API error " << res2->status << ": " << res2->body << '\n';
+			return 1;
+		}
+
+		responseData = json::parse(res2->body);
+		status = responseData["status"].get<std::string>();
 	}
+
+	if (config::debug)
+	{
+		std::cerr << "\n\n SECOND RESPONSE\n";
+		std::cerr << responseData.dump(2);
+	}
+	answer = getAnswer(responseData);
 	std::cout << '\n';
 	std::cout << answer;
 	if (answer.empty())
