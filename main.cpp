@@ -143,7 +143,9 @@ json getSearchResult(std::string apiKey, std::string query)
 		{"Authorization", "Bearer " + apiKey},
 	};
 	json body{
-		{ "query", query }
+		{ "query", query },
+		{"include_answer", true},
+		{"max_results", 3}
 	};
 
 	auto res = cli.Post(
@@ -165,11 +167,23 @@ json getSearchResult(std::string apiKey, std::string query)
 	}
 
 	json responseData{ json::parse(res->body) };
-	if (config::debug)
-	{
-		std::cout << "\nSearch result body\n" << responseData.dump(2) << '\n';
-	}
 	return responseData;
+}
+
+std::string formatSearchResult(const json& searchResult)
+{
+	std::string formattedString{};
+	if (!searchResult["answer"].is_null())
+	{
+		formattedString += "Answer: " + searchResult["answer"].get<std::string>() + "\n\n";
+	}
+	for (const auto& r : searchResult["results"])
+	{
+		formattedString += "- " + r["title"].get<std::string>() + "\n" 
+			+ r["content"].get<std::string>() + "\n"
+			+ r["url"].get<std::string>() + "\n\n";
+	}
+	return formattedString;
 }
 
 std::string getCommand()
@@ -360,8 +374,9 @@ int main()
 			{
 				functionID = e["id"].get<std::string>();
 				std::string query{ e["arguments"]["query"] };
-				std::string searchResult{ getSearchResult(*tavilyApiKey, query).dump() };
-				json result{ buildFunctionResult("webSearch", functionID, searchResult) };
+				json searchResult{ getSearchResult(*tavilyApiKey, query) };
+				std::string formattedResult{ formatSearchResult(searchResult) };
+				json result{ buildFunctionResult("webSearch", functionID, formattedResult) };
 				inputArray.push_back(result);
 				calledTool = true;
 			}
@@ -404,9 +419,6 @@ int main()
 
 		if (config::debug)
 		{
-			std::cerr << "\nFunction result being sent:\n";
-			std::cerr << inputArray.dump(2) << '\n';
-
 			std::cerr << "\n Body being sent:\n";
 			std::cerr << body2.dump(2) << '\n';
 		}
