@@ -4,3 +4,4 @@ x64/
 vcpkg_installed/
 *.vcxproj.user
 log.txt
+objectives.json

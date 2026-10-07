@@ -22,6 +22,7 @@ namespace config
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
 	constexpr bool debug{ true };
+	constexpr int iterationLimit{ 10 };
 }
 
 std::optional<std::string> getApiKey(const char* keyName)
@@ -50,6 +51,25 @@ std::optional<json> getTasks()
 	catch (const json::parse_error& e)
 	{
 		std::cout << "tasks.json is not a valid json. Description: " << e.what() << '\n';
+		return std::nullopt;
+
+	}
+}
+
+std::optional<json> getObjectives()
+{
+	std::ifstream file("C:/C++ Projects/Lynx/objectives.json");
+	if (!file.is_open())
+	{
+		return std::nullopt;
+	}
+	try
+	{
+		return json::parse(file);
+	}
+	catch (const json::parse_error& e)
+	{
+		std::cout << "objectives.json is not a valid json. Description: " << e.what() << '\n';
 		return std::nullopt;
 
 	}
@@ -145,6 +165,10 @@ json getSearchResult(std::string apiKey, std::string query)
 	}
 
 	json responseData{ json::parse(res->body) };
+	if (config::debug)
+	{
+		std::cout << "\nSearch result body\n" << responseData.dump(2) << '\n';
+	}
 	return responseData;
 }
 
@@ -225,15 +249,28 @@ int main()
 	json taskDeclaration = {
 		{"type", "function"},
 		{"name", "getTasks"},
-		{"description", "gets user's tasklist with status and deadlines"},
+		{"description", "Gets user's tasklist with status and deadlines. Use this only when information about the user's tasks is needed."},
 		{"parameters", parameters}
 	};
 
-	json webSearch = {
+	json queryProperty = {
+		{"query", {
+			{"type", "string"},
+			{"description", "The search query"}
+			}}
+	};
+
+	json webSearchParameters = {
+		{"type", "object"},
+		{"properties", queryProperty},
+		{"required", json::array({"query"})}
+	};
+
+	json webSearchDeclaration = {
 		{"type", "function"},
 		{"name", "webSearch"},
 		{"description", "Search the web"},
-		{"parameters", parameters}
+		{"parameters", webSearchParameters}
 	};
 
 	json pathProperty = {
@@ -249,17 +286,24 @@ int main()
 		{"required", json::array({"path"})}
 	};
 
-	json readFile = {
+	json readFileDeclaration = {
 		{"type", "function"},
 		{"name", "readFile"},
 		{"description", "Read the user's file"},
 		{"parameters", readFileParameters},
 	};
+
+	json objectivesDeclaration = {
+		{"type", "function"},
+		{"name", "getObjectives"},
+		{"description", "Get the current user objectives to determine what to work on"},
+		{"parameters", parameters}
+	};
 	
 	json body = {
 		{"model", config::modelName},
 		{"input", command},
-		{"tools", json::array({taskDeclaration, webSearch, readFile})}
+		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration})}
 	};
 
 	auto res = cli.Post(
@@ -296,11 +340,12 @@ int main()
 		std::cout << responseData.dump(2);
 	}
 
-	while (status == "requires_action")
+	int iterations{};
+	while (status == "requires_action" && iterations < config::iterationLimit)
 	{
+		++iterations;
 		bool calledTool{ false };
 		json inputArray = json::array();
-
 		for (const json& e : responseData["steps"])
 		{
 			if (e["type"] == "function_call" && e["name"] == "getTasks")
@@ -314,7 +359,8 @@ int main()
 			else if (e["type"] == "function_call" && e["name"] == "webSearch")
 			{
 				functionID = e["id"].get<std::string>();
-				std::string searchResult{ getSearchResult(*tavilyApiKey, command).dump() };
+				std::string query{ e["arguments"]["query"] };
+				std::string searchResult{ getSearchResult(*tavilyApiKey, query).dump() };
 				json result{ buildFunctionResult("webSearch", functionID, searchResult) };
 				inputArray.push_back(result);
 				calledTool = true;
@@ -330,6 +376,20 @@ int main()
 				inputArray.push_back(result);
 				calledTool = true;
 			}
+			else if (e["type"] == "function_call" && e["name"] == "getObjectives")
+			{
+				functionID = e["id"].get<std::string>();
+				std::optional<json> objectives{ getObjectives() };
+				if (!objectives)
+				{
+					std::cerr << "Failed to get objectives";
+					return 1;
+				}
+				std::string objectivesString{ (*objectives).dump() };
+				json result{ buildFunctionResult("getObjectives", functionID, objectivesString) };
+				inputArray.push_back(result);
+				calledTool = true;
+			}
 		}
 
 		if (!calledTool) // stops the loop if nothing matched
@@ -338,9 +398,18 @@ int main()
 		json body2{
 		{"model", config::modelName},
 		{"input", inputArray},
-		{"tools", json::array({taskDeclaration, webSearch, readFile})},
+		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration})},
 		{"previous_interaction_id", interactionID}
 		};
+
+		if (config::debug)
+		{
+			std::cerr << "\nFunction result being sent:\n";
+			std::cerr << inputArray.dump(2) << '\n';
+
+			std::cerr << "\n Body being sent:\n";
+			std::cerr << body2.dump(2) << '\n';
+		}
 
 		auto res2 = cli.Post(config::apiPath, headers, body2.dump(), "application/json");
 		if (!res2)
@@ -355,14 +424,14 @@ int main()
 		}
 
 		responseData = json::parse(res2->body);
+		if (config::debug)
+		{
+			std::cerr << "\nResponse: " << iterations << '\n';
+			std::cerr << responseData.dump(2);
+		}
 		status = responseData["status"].get<std::string>();
 	}
 
-	if (config::debug)
-	{
-		std::cerr << "\n\n SECOND RESPONSE\n";
-		std::cerr << responseData.dump(2);
-	}
 	answer = getAnswer(responseData);
 	std::cout << '\n';
 	std::cout << answer;
