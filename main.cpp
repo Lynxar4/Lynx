@@ -21,7 +21,7 @@ namespace config
 	constexpr auto modelName{ "gemini-3.5-flash-lite" };
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
-	constexpr bool debug{ true };
+	constexpr bool debug{ false };
 	constexpr int iterationLimit{ 10 };
 }
 
@@ -205,12 +205,12 @@ json buildFunctionResult(std::string_view functionName, std::string_view callID,
 	};
 }
 
-std::optional<std::string> readFileContents(const std::string& path)
+std::optional<std::string> readFileContents(std::string fileName)
 {
-	std::ifstream file{ path };
+	std::ifstream file{"C:/Lynx files/" + fileName};
 	if (!file)
 	{
-		std::cerr << path << " could not be opened for reading.\n";
+		std::cerr << fileName << " could not be opened for reading.\n";
 		return std::nullopt;
 	}
 
@@ -222,6 +222,18 @@ std::optional<std::string> readFileContents(const std::string& path)
 	}
 
 	return fileText;
+}
+
+bool writeFile(std::string fileName, std::string_view content)
+{
+	std::ofstream outf{ "C:/Lynx files/" + fileName };
+	if (!outf)
+	{
+		std::cerr << fileName << " could not be opened for writing.\n";
+		return false;
+	}
+	outf << content;
+	return true;
 }
 
 int main()
@@ -287,17 +299,17 @@ int main()
 		{"parameters", webSearchParameters}
 	};
 
-	json pathProperty = {
-		{"path", {
-			{"type", "string"},
-			{"description", "path of the file"}
-			}}
+	json fileNameProperty = {
+		{"type", "string"},
+		{"description", "The name of the file"}
 	};
 
 	json readFileParameters = {
 		{"type", "object"},
-		{"properties", pathProperty},
-		{"required", json::array({"path"})}
+		{"properties", {
+			{"fileName", fileNameProperty}
+			}},
+		{"required", json::array({"fileName"})}
 	};
 
 	json readFileDeclaration = {
@@ -305,6 +317,27 @@ int main()
 		{"name", "readFile"},
 		{"description", "Read the user's file"},
 		{"parameters", readFileParameters},
+	};
+
+	json contentProperty = {
+		{"type", "string"},
+		{"description", "content to put in the file"}
+	};
+
+	json writeFileParameter = {
+		{"type", "object"},
+		{"properties", {
+			{"fileName", fileNameProperty},
+			{"content", contentProperty}
+			}},
+		{"required", json::array({"fileName", "content"})}
+	};
+
+	json writeFileDeclaration = {
+		{"type", "function"},
+		{"name", "writeFile"},
+		{"description", "Write a txt file in this directory C:/Lynx files"},
+		{"parameters", writeFileParameter},
 	};
 
 	json objectivesDeclaration = {
@@ -317,7 +350,7 @@ int main()
 	json body = {
 		{"model", config::modelName},
 		{"input", command},
-		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration})}
+		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration, writeFileDeclaration})}
 	};
 
 	auto res = cli.Post(
@@ -383,8 +416,8 @@ int main()
 			else if (e["type"] == "function_call" && e["name"] == "readFile")
 			{
 				functionID = e["id"].get<std::string>();
-				std::string path{ e["arguments"]["path"] };
-				std::optional<std::string> fileContent{ readFileContents(path) };
+				std::string fileName{ e["arguments"]["fileName"] };
+				std::optional<std::string> fileContent{ readFileContents(fileName) };
 				if (!fileContent)
 					return 1;
 				json result{ buildFunctionResult("readFile", functionID, *fileContent) };
@@ -405,6 +438,23 @@ int main()
 				inputArray.push_back(result);
 				calledTool = true;
 			}
+			else if (e["type"] == "function_call" && e["name"] == "writeFile")
+			{
+				functionID = e["id"].get<std::string>();
+				bool wroteFile{ writeFile(e["arguments"]["fileName"], e["arguments"]["content"]) };
+				std::string status{};
+				if (wroteFile)
+				{
+					status = "The user successfully recieved the file you wrote.";
+				}
+				else
+				{
+					status = "An error occured while writing the file.";
+				}
+				json result{ buildFunctionResult("writeFile", functionID, status) };
+				inputArray.push_back(result);
+				calledTool = true;
+			}
 		}
 
 		if (!calledTool) // stops the loop if nothing matched
@@ -413,7 +463,7 @@ int main()
 		json body2{
 		{"model", config::modelName},
 		{"input", inputArray},
-		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration})},
+		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration, writeFileDeclaration})},
 		{"previous_interaction_id", interactionID}
 		};
 
