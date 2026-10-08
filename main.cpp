@@ -21,8 +21,9 @@ namespace config
 	constexpr auto modelName{ "gemini-3.5-flash-lite" };
 	constexpr auto tasksPath{ "C:/C++ Projects/Lynx/tasks.json" };
 	constexpr auto logPath{ "C:/C++ Projects/Lynx/log.txt" };
-	constexpr bool debug{ false };
+	constexpr bool debug{ true };
 	constexpr int iterationLimit{ 10 };
+	constexpr int webSearchLimit{ 5 };
 }
 
 std::optional<std::string> getApiKey(const char* keyName)
@@ -135,7 +136,7 @@ std::string getAnswer(const json& response)
 	return answer;
 }
 
-json getSearchResult(std::string apiKey, std::string query)
+std::optional<json> getSearchResult(std::string apiKey, std::string query)
 {
 	httplib::Client cli(config::tavilyServer);
 	httplib::Headers headers{
@@ -163,7 +164,7 @@ json getSearchResult(std::string apiKey, std::string query)
 	if (res->status != 200)
 	{
 		std::cout << "API error " << res->status << ": " << res->body << '\n';
-		return 1;
+		return std::nullopt;
 	}
 
 	json responseData{ json::parse(res->body) };
@@ -260,6 +261,21 @@ int main()
 	json tasks = *tasksOpt;
 	std::vector<json> sortedTasks{ getSortedTasks(tasks) };
 
+	std::optional<json> objectivesOpt{ getObjectives() };
+	if (!objectivesOpt)
+	{
+		std::cout << "Failed to get objectives.\n";
+		return 1;
+	}
+	std::string objectivesString{};
+	for (const auto& o : *objectivesOpt)
+	{
+		if (o.value("active", false))
+		{
+			objectivesString += "- " + o["name"].get<std::string>() + ": " + o["description"].get<std::string>() + '\n';
+		}
+	}
+
 	httplib::Client cli(config::geminiServer);
 	httplib::Headers headers = {
 		{ "x-goog-api-key", *geminiApiKey }
@@ -340,17 +356,19 @@ int main()
 		{"parameters", writeFileParameter},
 	};
 
-	json objectivesDeclaration = {
-		{"type", "function"},
-		{"name", "getObjectives"},
-		{"description", "Get the current user objectives to determine what to work on"},
-		{"parameters", parameters}
+	json tools = json::array({ taskDeclaration, webSearchDeclaration, readFileDeclaration, writeFileDeclaration });
+	std::string systemInstruction{
+		"The user's active objectives:\n" + objectivesString +
+		"Tool results stay in the conversation. Never call a tool twice with the same arguments. "
+		"Call all independent tools in the same turn. Do at most " + std::to_string(config::webSearchLimit) + " web searches. "
+		"If you need to write a file, write it as soon as you have enough information." 
 	};
-	
+
 	json body = {
 		{"model", config::modelName},
+		{"system_instruction", systemInstruction},
 		{"input", command},
-		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration, writeFileDeclaration})}
+		{"tools", tools}
 	};
 
 	auto res = cli.Post(
@@ -388,10 +406,11 @@ int main()
 	}
 
 	int iterations{};
+	int webSearchCounter{};
+	int toolCalls{};
 	while (status == "requires_action" && iterations < config::iterationLimit)
 	{
 		++iterations;
-		bool calledTool{ false };
 		json inputArray = json::array();
 		for (const json& e : responseData["steps"])
 		{
@@ -401,17 +420,26 @@ int main()
 				std::string tasklist{ getListString(sortedTasks) };
 				json result{buildFunctionResult("getTasks", functionID, tasklist)};
 				inputArray.push_back(result);
-				calledTool = true;
 			}
 			else if (e["type"] == "function_call" && e["name"] == "webSearch")
 			{
+				++webSearchCounter;
 				functionID = e["id"].get<std::string>();
+				if (webSearchCounter > config::webSearchLimit)
+				{
+					inputArray.push_back(buildFunctionResult("webSearch", functionID, "You have reached the maximum number of web searches. Complete the task with what you know."));
+					continue;
+				}
 				std::string query{ e["arguments"]["query"] };
-				json searchResult{ getSearchResult(*tavilyApiKey, query) };
-				std::string formattedResult{ formatSearchResult(searchResult) };
+				std::optional<json> searchResultOpt{ getSearchResult(*tavilyApiKey, query) };
+				if (!searchResultOpt)
+				{
+					inputArray.push_back(buildFunctionResult("webSearch", functionID, "Search failed."));
+					continue;
+				}
+				std::string formattedResult{ formatSearchResult(*searchResultOpt) };
 				json result{ buildFunctionResult("webSearch", functionID, formattedResult) };
 				inputArray.push_back(result);
-				calledTool = true;
 			}
 			else if (e["type"] == "function_call" && e["name"] == "readFile")
 			{
@@ -419,24 +447,12 @@ int main()
 				std::string fileName{ e["arguments"]["fileName"] };
 				std::optional<std::string> fileContent{ readFileContents(fileName) };
 				if (!fileContent)
-					return 1;
+				{
+					inputArray.push_back(buildFunctionResult("readFile", functionID, "File not found."));
+					continue;
+				}
 				json result{ buildFunctionResult("readFile", functionID, *fileContent) };
 				inputArray.push_back(result);
-				calledTool = true;
-			}
-			else if (e["type"] == "function_call" && e["name"] == "getObjectives")
-			{
-				functionID = e["id"].get<std::string>();
-				std::optional<json> objectives{ getObjectives() };
-				if (!objectives)
-				{
-					std::cerr << "Failed to get objectives";
-					return 1;
-				}
-				std::string objectivesString{ (*objectives).dump() };
-				json result{ buildFunctionResult("getObjectives", functionID, objectivesString) };
-				inputArray.push_back(result);
-				calledTool = true;
 			}
 			else if (e["type"] == "function_call" && e["name"] == "writeFile")
 			{
@@ -453,17 +469,29 @@ int main()
 				}
 				json result{ buildFunctionResult("writeFile", functionID, status) };
 				inputArray.push_back(result);
-				calledTool = true;
+			}
+			else if (e["type"] == "function_call")
+			{
+				inputArray.push_back(buildFunctionResult(e["name"], e["id"], "Unknown tool."));
 			}
 		}
+		toolCalls += static_cast<int>(inputArray.size());
 
-		if (!calledTool) // stops the loop if nothing matched
+		if (inputArray.empty()) // stops the loop if nothing matched
+		{
 			break;
+		}
+
+		if (iterations == config::iterationLimit)
+		{
+			systemInstruction += "\nThis is your last turn. Do not call anymore tools. Answer with the information you have.";
+		}
 
 		json body2{
 		{"model", config::modelName},
+		{"system_instruction", systemInstruction},
 		{"input", inputArray},
-		{"tools", json::array({taskDeclaration, webSearchDeclaration, readFileDeclaration, objectivesDeclaration, writeFileDeclaration})},
+		{"tools", tools},
 		{"previous_interaction_id", interactionID}
 		};
 
@@ -495,12 +523,12 @@ int main()
 	}
 
 	answer = getAnswer(responseData);
-	std::cout << '\n';
-	std::cout << answer;
 	if (answer.empty())
 	{
 		answer = "An error occured somewhere. First response status: " + status;
 	}
+	std::cout << "\nIterations: " << iterations << "\nTool calls: " << toolCalls << "\nSearches: " << webSearchCounter << '\n';
+	std::cout << answer;
 
 	std::ofstream log(config::logPath, std::ios::app);
 	if (!log.is_open())
